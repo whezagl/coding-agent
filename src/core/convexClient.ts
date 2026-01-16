@@ -8,13 +8,13 @@
  * specified by environment variables.
  */
 
-import { ConvexClient } from 'convex/browser';
+import { ConvexHttpClient } from 'convex/browser';
 
 /**
  * Singleton Convex client instance.
  * Initialized on first access and reused for subsequent calls.
  */
-let convexClient: ConvexClient | null = null;
+let convexClient: ConvexHttpClient | null = null;
 
 /**
  * Get or create the Convex client singleton.
@@ -26,7 +26,7 @@ let convexClient: ConvexClient | null = null;
  * @returns Convex client instance
  * @throws Error if required environment variables are not set
  */
-export function getConvexClient(): ConvexClient {
+export function getConvexClient(): ConvexHttpClient {
   if (convexClient) {
     return convexClient;
   }
@@ -49,13 +49,11 @@ export function getConvexClient(): ConvexClient {
   }
 
   // Create Convex client configured for self-hosted backend
-  convexClient = new ConvexClient(convexUrl, {
-    // For backend operations, we use admin authentication
-    // In production with proper auth, this would use user credentials
-    async unsafelyGetAuthToken() {
-      return adminKey;
-    },
+  convexClient = new ConvexHttpClient(convexUrl, {
+    skipConvexDeploymentUrlCheck: true,
   });
+  // Set admin authentication for server-side operations
+  convexClient.setAdminAuth(adminKey);
 
   return convexClient;
 }
@@ -63,11 +61,11 @@ export function getConvexClient(): ConvexClient {
 /**
  * Close the Convex client connection.
  *
- * Call this when shutting down the application to clean up resources.
+ * For HTTP client, this simply clears the singleton instance.
  */
 export function closeConvexClient(): void {
   if (convexClient) {
-    convexClient.close();
+    // ConvexHttpClient doesn't require explicit cleanup
     convexClient = null;
   }
 }
