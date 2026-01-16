@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node --loader tsx src/cli/index.ts",
+    "start": "node dist/cli/index.js",
     "dev": "tsx watch src/cli/index.ts",
     "test": "vitest",
     "test:integration": "vitest --config vitest.integration.config.ts",
