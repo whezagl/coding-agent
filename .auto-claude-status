@@ -1,0 +1,25 @@
+{
+  "active": true,
+  "spec": "001-coding-agent",
+  "state": "building",
+  "subtasks": {
+    "completed": 18,
+    "total": 19,
+    "in_progress": 1,
+    "failed": 0
+  },
+  "phase": {
+    "current": "Integration and Documentation",
+    "id": null,
+    "total": 3
+  },
+  "workers": {
+    "active": 0,
+    "max": 1
+  },
+  "session": {
+    "number": 20,
+    "started_at": "2026-01-16T09:54:12.481046"
+  },
+  "last_update": "2026-01-16T10:54:31.676896"
+}
