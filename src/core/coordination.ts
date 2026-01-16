@@ -337,7 +337,13 @@ export async function orchestrateAgents(
  * Used when a previous orchestration was interrupted or failed.
  * Retrieves the last incomplete task and continues from where it left off.
  *
- * @param convex - Convex client for state management
+ * Resume Logic:
+ * 1. Retrieves the latest incomplete task from Convex
+ * 2. Loads all previous agent sessions for the task
+ * 3. Determines which agents have completed successfully
+ * 4. Continues execution from the first incomplete or failed agent
+ * 5. Stores errors in Convex for debugging
+ *
  * @param options - Orchestration configuration
  * @returns Promise resolving to orchestration result
  *
@@ -353,9 +359,9 @@ export async function orchestrateAgents(
 export async function resumeOrchestration(
   options: OrchestrationOptions
 ): Promise<OrchestrationResult> {
-  const { convex, workingDirectory, agents, executionOptions } = options;
+  const { convex, workingDirectory, agents, executionOptions, skipReview = false } = options;
 
-  // Get the latest incomplete task
+  // Clear any existing error on the task before resuming
   const task = await convex.query<{
     _id: string;
     description: string;
@@ -365,10 +371,16 @@ export async function resumeOrchestration(
   } | null>('tasks/getLatestIncompleteTask');
 
   if (!task) {
-    throw new WorkflowError('No incomplete task found to resume');
+    throw new WorkflowError('No incomplete task found to resume. All tasks are completed.');
   }
 
   const taskId = task._id;
+  const taskDescription = task.description;
+
+  // Clear previous error if present
+  if (task.error) {
+    await convex.mutation('tasks/clearTaskError', { taskId });
+  }
 
   // Get existing agent sessions for this task
   const sessions = await convex.query<
@@ -386,7 +398,10 @@ export async function resumeOrchestration(
   let planContext: PlanContext | undefined;
   let codeChanges: CodeChangesContext[] = [];
 
-  // Process completed sessions
+  // Track which agents have completed successfully
+  const completedAgents = new Set<AgentType>();
+
+  // Process completed sessions to build context
   for (const session of sessions) {
     if (session.status === 'completed' && session.result) {
       const result: AgentResult = {
@@ -396,6 +411,7 @@ export async function resumeOrchestration(
         completedAt: new Date(session.completedAt ?? session.startedAt),
       };
       agentResults.push(result);
+      completedAgents.add(session.agentType as AgentType);
 
       // Update context based on agent type
       if (session.agentType === 'planner') {
@@ -403,86 +419,130 @@ export async function resumeOrchestration(
           content: session.result,
           createdAt: new Date(session.completedAt ?? session.startedAt),
         };
+      } else if (session.agentType === 'coder') {
+        // Extract code changes from coder result metadata
+        // Note: In a real implementation, we'd load this from Convex codeChanges table
+        if (result.metadata?.codeChanges) {
+          codeChanges = result.metadata.codeChanges as CodeChangesContext[];
+        }
       }
     }
   }
 
-  // Determine next agent to execute
-  const lastSession = sessions[0]; // Most recent first
-  const lastAgentType = lastSession?.agentType as AgentType;
+  // Determine the sequence of agents to execute
+  // We always execute Planner → Coder → Reviewer in order
+  // but skip any that have already completed successfully
+  const agentsToExecute: AgentType[] = [];
 
-  let nextAgent: BaseAgent;
-  let nextContext: AgentContext;
-
-  if (lastAgentType === 'planner' || lastSession?.status === 'failed') {
-    // Planner failed, need to retry from Planner
-    nextAgent = agents.planner;
-    nextContext = {
-      task: { description: task.description, id: taskId },
-      previousSessions: agentResults.map(resultToSession),
-    };
-  } else if (lastAgentType === 'coder') {
-    // Coder completed, need to run Reviewer
-    if (!agents.reviewer) {
-      throw new WorkflowError('Reviewer agent is required for resume');
-    }
-    nextAgent = agents.reviewer;
-    nextContext = {
-      task: { description: task.description, id: taskId },
-      plan: planContext,
-      codeChanges,
-      previousSessions: agentResults.map(resultToSession),
-    };
-
-    // Update task status
-    await convex.mutation('tasks/updateTaskStatus', {
-      taskId,
-      status: TaskStatusEnum.Reviewing,
-    });
-  } else {
-    // Planner completed, need to run Coder
-    nextAgent = agents.coder;
-    nextContext = {
-      task: { description: task.description, id: taskId },
-      plan: planContext,
-      previousSessions: agentResults.map(resultToSession),
-    };
-
-    // Update task status
-    await convex.mutation('tasks/updateTaskStatus', {
-      taskId,
-      status: TaskStatusEnum.Coding,
-    });
+  if (!completedAgents.has(AgentType.Planner)) {
+    agentsToExecute.push(AgentType.Planner);
+  }
+  if (!completedAgents.has(AgentType.Coder)) {
+    agentsToExecute.push(AgentType.Coder);
+  }
+  if (!skipReview && !completedAgents.has(AgentType.Reviewer) && agents.reviewer) {
+    agentsToExecute.push(AgentType.Reviewer);
   }
 
-  try {
-    // Execute the next agent
-    const result = await executeAgent(
-      convex,
+  // Check if there's nothing to do
+  if (agentsToExecute.length === 0) {
+    // All agents completed - mark task as completed
+    await convex.mutation('tasks/updateTaskStatus', {
       taskId,
-      nextAgent,
-      nextContext,
-      executionOptions
-    );
+      status: TaskStatusEnum.Completed,
+    });
 
-    agentResults.push(result);
+    return {
+      taskId,
+      status: TaskStatusEnum.Completed,
+      agentResults,
+    };
+  }
 
-    if (!result.success) {
-      await convex.mutation('tasks/setTaskError', {
-        taskId,
-        error: result.error ?? `${nextAgent.getAgentType()} agent failed`,
-      });
-      return {
-        taskId,
-        status: TaskStatusEnum.Failed,
-        agentResults,
-        error: result.error,
+  // Execute remaining agents in sequence
+  try {
+    for (const agentType of agentsToExecute) {
+      const agent = agents[agentType];
+      if (!agent) {
+        throw new WorkflowError(`${agentType} agent not found in provided agents`);
+      }
+
+      // Build context for this agent
+      const context: AgentContext = {
+        task: { description: taskDescription, id: taskId },
+        previousSessions: agentResults.map(resultToSession),
       };
+
+      // Add plan context if we have it (for Coder and Reviewer)
+      if (agentType !== AgentType.Planner && planContext) {
+        context.plan = planContext;
+      }
+
+      // Add code changes context for Reviewer
+      if (agentType === AgentType.Reviewer && codeChanges.length > 0) {
+        context.codeChanges = codeChanges;
+      }
+
+      // Update task status based on agent type
+      let taskStatus: TaskStatus;
+      switch (agentType) {
+        case AgentType.Planner:
+          taskStatus = TaskStatusEnum.Planning;
+          break;
+        case AgentType.Coder:
+          taskStatus = TaskStatusEnum.Coding;
+          break;
+        case AgentType.Reviewer:
+          taskStatus = TaskStatusEnum.Reviewing;
+          break;
+      }
+
+      await convex.mutation('tasks/updateTaskStatus', {
+        taskId,
+        status: taskStatus,
+      });
+
+      // Execute the agent
+      const result = await executeAgent(
+        convex,
+        taskId,
+        agent,
+        context,
+        executionOptions
+      );
+
+      agentResults.push(result);
+
+      // Check if agent failed
+      if (!result.success) {
+        await convex.mutation('tasks/setTaskError', {
+          taskId,
+          error: result.error ?? `${agentType} agent failed`,
+        });
+
+        return {
+          taskId,
+          status: TaskStatusEnum.Failed,
+          agentResults,
+          error: result.error,
+        };
+      }
+
+      // Update context for next agents
+      if (agentType === AgentType.Planner) {
+        planContext = {
+          content: result.content,
+          createdAt: result.completedAt,
+        };
+      } else if (agentType === AgentType.Coder) {
+        // Extract code changes from result metadata
+        if (result.metadata?.codeChanges) {
+          codeChanges = result.metadata.codeChanges as CodeChangesContext[];
+        }
+      }
     }
 
-    // Continue with remaining agents
-    // ... (similar to orchestrateAgents but starting from current state)
-
+    // All remaining agents completed successfully
     await convex.mutation('tasks/updateTaskStatus', {
       taskId,
       status: TaskStatusEnum.Completed,
@@ -495,7 +555,9 @@ export async function resumeOrchestration(
     };
 
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    // Handle unexpected errors during execution
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error during resume';
+
     await convex.mutation('tasks/setTaskError', {
       taskId,
       error: errorMessage,
