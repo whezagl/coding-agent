@@ -1,0 +1,50 @@
+services:
+  backend:
+    image: getconvex/convex-backend:latest
+    container_name: convex-backend
+    ports:
+      - "3210:3210"
+      - "3211:3211"
+    volumes:
+      - convex_data:/convex/storage
+    environment:
+      - CONVEX_SITE_URL=http://localhost:3211
+      - CONVEX_SITE_ADMIN_KEY=${CONVEX_SELF_HOSTED_ADMIN_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3210/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - convex-network
+
+  dashboard:
+    image: getconvex/convex-dashboard:latest
+    container_name: convex-dashboard
+    ports:
+      - "6791:6791"
+    environment:
+      - CONVEX_SELF_HOSTED_URL=http://backend:3210
+      - CONVEX_SELF_HOSTED_ADMIN_KEY=${CONVEX_SELF_HOSTED_ADMIN_KEY:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6791"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - convex-network
+
+volumes:
+  convex_data:
+    driver: local
+
+networks:
+  convex-network:
+    driver: bridge
