@@ -246,7 +246,7 @@ export class ClaudeSDKClient {
     options?: Partial<ClaudeSDKClientConfig>
   ): AsyncGenerator<ClaudeSDKChunk, void, unknown> {
     // Import query dynamically to avoid issues if SDK is not installed
-    const { query: sdkQuery } = await import('@anthropic-ai/claude-agent-sdk');
+    const { query: sdkQuery } = await import('@anthropic-ai/claude-code');
 
     // Merge client config with query options
     const queryOptions = {

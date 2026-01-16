@@ -8,7 +8,7 @@
  * specified by environment variables.
  */
 
-import { ConvexClient } from 'convex/client';
+import { ConvexClient } from 'convex/browser';
 
 /**
  * Singleton Convex client instance.
